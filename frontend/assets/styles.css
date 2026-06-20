@@ -81,6 +81,26 @@ button.primary {
   color: #ffffff;
 }
 
+.button-link {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  display: inline-flex;
+  font-weight: 700;
+  justify-content: center;
+  min-height: 2.75rem;
+  padding: 0.7rem 0.9rem;
+  text-decoration: none;
+}
+
+.button-link.primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #ffffff;
+}
+
 main {
   margin: 0 auto;
   max-width: 1240px;
@@ -167,10 +187,23 @@ main {
   padding: 1rem;
 }
 
+.app-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
 .card p {
   color: var(--muted);
   line-height: 1.55;
   margin-top: 0.45rem;
+}
+
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: auto;
 }
 
 .meta {

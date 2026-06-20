@@ -2,6 +2,8 @@
 
 A cloneable Suranku template for data intelligence: contracts, marker-driven ingestion, historical catalog layers, lineage, process lineage, and AI-assisted answers.
 
+Hosted UI: `https://labs.suranku.com`
+
 The first demo uses a retail commerce domain with orders, payments, and shipments. It is intentionally lightweight so teams can understand the architecture before replacing the demo adapters with Kafka, Iceberg, S3, MinIO, or enterprise catalog services.
 
 ## What It Demonstrates
@@ -33,13 +35,28 @@ curl http://localhost:8080/api/lineage/data
 
 ## Public UI On GitHub Pages
 
-The portal UI can be hosted directly from GitHub Pages. The included workflow publishes the `frontend/` folder on every push to `main`.
+Suranku Labs is the public hub for free Suranku apps, demos, templates, and experiments. The Data Intelligence Portal is the first Labs app:
+
+- Labs hub: `https://labs.suranku.com`
+- Data Intelligence Portal: `https://labs.suranku.com/data-intelligence-portal/`
+- GitHub repository: `https://github.com/Yamini-Suranku/data-intelligence-portal`
+
+The UI can be hosted directly from GitHub Pages. The included workflow publishes the `frontend/` folder on every push to `main`, and `frontend/CNAME` configures the custom domain as `labs.suranku.com`.
 
 In GitHub, enable:
 
 1. Repository **Settings**.
 2. **Pages**.
 3. Source: **GitHub Actions**.
+4. Custom domain: `labs.suranku.com`.
+
+Add this DNS record wherever `suranku.com` is managed:
+
+| Type | Name/Host | Target |
+| --- | --- | --- |
+| CNAME | `labs` | `yamini-suranku.github.io` |
+
+After GitHub validates the certificate, enable **Enforce HTTPS**.
 
 The Pages version runs as a browser-only demo when the FastAPI backend is not available. It uses the same UI and simulates reset, ingestion, catalogs, lineage, process lineage, and chat locally in the browser.
 
