@@ -25,6 +25,9 @@ OBJECT_STORE = Path(os.getenv("PORTAL_OBJECT_STORE", DATA_DIR / "object-store"))
 DEMO_DIR = ROOT / "demo"
 CONTRACTS_DIR = ROOT / "contracts"
 AGENTS_DIR = ROOT / "agents"
+# Root the repo scanner is allowed to read. Configured source paths resolve under
+# here (safe_path guards traversal). Mount your repos into this dir in Docker.
+SCAN_ROOT = Path(os.getenv("PORTAL_SCAN_ROOT", ROOT / "repos"))
 # Published static site (hub + all app UIs + shared assets/learn/agents). In the
 # suranku-public monorepo it lives at the repo root (../../site relative to this app),
 # not under the app dir. Override with PORTAL_SITE (e.g. the Docker image copies it to /app/site).
@@ -68,6 +71,15 @@ class ProcessLineageIn(BaseModel):
     run_id: str
     step_name: str
     detail: str = ""
+
+
+class ScanSourceIn(BaseModel):
+    name: str
+    path: str  # resolved under SCAN_ROOT
+    sql_globs: list[str] = []
+    report_globs: list[str] = []
+    naming_conventions: list[dict[str, Any]] = []
+    dialect: str = ""
 
 
 def slugify(text: str) -> str:
@@ -156,12 +168,60 @@ def init_db() -> None:
                 detail text not null,
                 created_at text not null
             );
+            create table if not exists scan_sources (
+                id text primary key,
+                name text not null,
+                kind text not null default 'local_path',
+                path text not null,
+                sql_globs text not null default '[]',
+                report_globs text not null default '[]',
+                naming_conventions text not null default '[]',
+                dialect text not null default '',
+                created_at text not null
+            );
+            create table if not exists scan_runs (
+                id text primary key,
+                source_id text not null,
+                started_at text not null,
+                completed_at text not null,
+                status text not null,
+                files integer not null default 0,
+                tables integer not null default 0,
+                columns integer not null default 0,
+                warnings text not null default '[]'
+            );
+            create table if not exists scanned_assets (
+                id text primary key,
+                scan_id text not null,
+                source_id text not null,
+                asset_type text not null,
+                path text not null,
+                name text not null,
+                created_at text not null
+            );
+            create table if not exists column_lineage (
+                id text primary key,
+                scan_id text,
+                asset text,
+                source_table text,
+                source_column text,
+                target_table text not null,
+                target_column text not null,
+                transformation text,
+                created_at text not null
+            );
             """
         )
         # Migration for DBs created before schema_text existed.
         columns = {row[1] for row in conn.execute("pragma table_info(contracts)")}
         if "schema_text" not in columns:
             conn.execute("alter table contracts add column schema_text text")
+        # Migration: data_lineage gained asset/scan provenance for scanned edges.
+        dl_columns = {row[1] for row in conn.execute("pragma table_info(data_lineage)")}
+        if "asset" not in dl_columns:
+            conn.execute("alter table data_lineage add column asset text")
+        if "scan_id" not in dl_columns:
+            conn.execute("alter table data_lineage add column scan_id text")
 
 
 def load_json(path: Path) -> Any:
@@ -294,7 +354,7 @@ def ingest_records(
             (table_id, layer, contract["domain_id"], contract["event_name"], contract["id"], output_path, len(deduped), completed),
         )
         conn.execute(
-            "insert into data_lineage values (?, ?, ?, ?, ?, ?)",
+            "insert into data_lineage (id, source, target, relation, contract_id, run_id) values (?, ?, ?, ?, ?, ?)",
             (f"lin_{uuid.uuid4().hex[:12]}", contract["topic"], table_id, "ingested_to", contract["id"], run_id),
         )
     for step, detail in (
@@ -432,7 +492,10 @@ def openai_answer(question: str) -> dict[str, Any] | None:
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=20) as response:
+        # Local models (Ollama, LM Studio) are slower than cloud APIs on a full
+        # context, so allow a longer timeout via OPENAI_TIMEOUT (default 20s).
+        timeout = float(os.getenv("OPENAI_TIMEOUT", "20"))
+        with request.urlopen(req, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
             return {"mode": "openai-compatible", "answer": body["choices"][0]["message"]["content"], "sources": ["local portal context"]}
     except Exception:
@@ -612,7 +675,7 @@ def add_data_lineage(payload: DataLineageIn) -> dict[str, Any]:
     lineage_id = f"lin_{uuid.uuid4().hex[:12]}"
     with connect() as conn:
         conn.execute(
-            "insert into data_lineage values (?, ?, ?, ?, ?, ?)",
+            "insert into data_lineage (id, source, target, relation, contract_id, run_id) values (?, ?, ?, ?, ?, ?)",
             (lineage_id, payload.source, payload.target, payload.relation, None, None),
         )
     return {"id": lineage_id, **payload.model_dump()}
@@ -633,6 +696,144 @@ def add_process_lineage(payload: ProcessLineageIn) -> dict[str, Any]:
 @app.post("/api/ingestion-runs")
 def generalized_ingestion() -> dict[str, Any]:
     return run_ingestion()
+
+
+# ------------------------------------------------------------------- repo scanner
+
+def _persist_scan(conn: sqlite3.Connection, source: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Persist scan_run + assets + table/column lineage; return the run summary."""
+    scan_id = uuid.uuid4().hex
+    now = utc_now()
+    asset_ids: dict[str, str] = {}
+    for asset in result["assets"]:
+        aid = uuid.uuid4().hex
+        asset_ids[asset["name"]] = aid
+        conn.execute(
+            "insert into scanned_assets (id, scan_id, source_id, asset_type, path, name, created_at)"
+            " values (?, ?, ?, ?, ?, ?, ?)",
+            (aid, scan_id, source["id"], asset["asset_type"], asset["path"], asset["name"], now),
+        )
+    for edge in result["table_edges"]:
+        conn.execute(
+            "insert into data_lineage (id, source, target, relation, contract_id, run_id, asset, scan_id)"
+            " values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (uuid.uuid4().hex, edge["source"], edge["target"], edge["relation"], None, None, edge.get("asset"), scan_id),
+        )
+    for ce in result["column_edges"]:
+        conn.execute(
+            "insert into column_lineage (id, scan_id, asset, source_table, source_column,"
+            " target_table, target_column, transformation, created_at)"
+            " values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (uuid.uuid4().hex, scan_id, ce.get("asset"), ce.get("source_table"), ce.get("source_column"),
+             ce["target_table"], ce["target_column"], ce.get("transformation"), now),
+        )
+    summary = {
+        "id": scan_id,
+        "source_id": source["id"],
+        "started_at": now,
+        "completed_at": utc_now(),
+        "status": "completed",
+        "files": result["files"],
+        "tables": len(result["tables"]),
+        "columns": len(result["column_edges"]),
+        "warnings": result["warnings"],
+    }
+    conn.execute(
+        "insert into scan_runs (id, source_id, started_at, completed_at, status, files, tables, columns, warnings)"
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (summary["id"], summary["source_id"], summary["started_at"], summary["completed_at"], summary["status"],
+         summary["files"], summary["tables"], summary["columns"], json.dumps(summary["warnings"])),
+    )
+    return summary
+
+
+@app.post("/api/scan/sources", status_code=201)
+def create_scan_source(payload: ScanSourceIn) -> dict[str, Any]:
+    safe_path(SCAN_ROOT, payload.path)  # reject traversal outside SCAN_ROOT
+    ensure_demo()
+    record = {
+        "id": uuid.uuid4().hex,
+        "name": payload.name,
+        "kind": "local_path",
+        "path": payload.path,
+        "sql_globs": json.dumps(payload.sql_globs),
+        "report_globs": json.dumps(payload.report_globs),
+        "naming_conventions": json.dumps(payload.naming_conventions),
+        "dialect": payload.dialect,
+        "created_at": utc_now(),
+    }
+    with connect() as conn:
+        conn.execute(
+            "insert into scan_sources (id, name, kind, path, sql_globs, report_globs, naming_conventions, dialect, created_at)"
+            " values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            tuple(record[k] for k in ("id", "name", "kind", "path", "sql_globs", "report_globs", "naming_conventions", "dialect", "created_at")),
+        )
+    return record
+
+
+@app.get("/api/scan/sources")
+def list_scan_sources() -> list[dict[str, Any]]:
+    ensure_demo()
+    with connect() as conn:
+        data = rows(conn, "select * from scan_sources order by created_at desc")
+    for item in data:
+        for field in ("sql_globs", "report_globs", "naming_conventions"):
+            item[field] = json.loads(item[field] or "[]")
+    return data
+
+
+@app.post("/api/scan/sources/{source_id}/run")
+def run_scan_source(source_id: str) -> dict[str, Any]:
+    from .scanner import scan_repo  # imported lazily so the app starts without sqlglot
+
+    ensure_demo()
+    with connect() as conn:
+        found = rows(conn, "select * from scan_sources where id = ?", (source_id,))
+        if not found:
+            raise HTTPException(status_code=404, detail="Scan source not found")
+        source = found[0]
+        base = safe_path(SCAN_ROOT, source["path"])
+        if not base.is_dir():
+            raise HTTPException(status_code=400, detail=f"Path not found under scan root: {source['path']}")
+        result = scan_repo(
+            base,
+            sql_globs=json.loads(source["sql_globs"] or "[]") or None,
+            report_globs=json.loads(source["report_globs"] or "[]") or None,
+            naming_conventions=json.loads(source["naming_conventions"] or "[]"),
+            dialect=source["dialect"] or None,
+        )
+        summary = _persist_scan(conn, source, result)
+    return summary
+
+
+@app.get("/api/scan/runs")
+def list_scan_runs() -> list[dict[str, Any]]:
+    ensure_demo()
+    with connect() as conn:
+        data = rows(conn, "select * from scan_runs order by started_at desc")
+    for item in data:
+        item["warnings"] = json.loads(item["warnings"] or "[]")
+    return data
+
+
+@app.get("/api/scan/assets")
+def list_scanned_assets() -> list[dict[str, Any]]:
+    ensure_demo()
+    with connect() as conn:
+        return rows(conn, "select * from scanned_assets order by created_at desc, name")
+
+
+@app.get("/api/lineage/columns")
+def column_lineage(table: str | None = None) -> list[dict[str, Any]]:
+    ensure_demo()
+    with connect() as conn:
+        if table:
+            return rows(
+                conn,
+                "select * from column_lineage where source_table = ? or target_table = ? order by target_table, target_column",
+                (table, table),
+            )
+        return rows(conn, "select * from column_lineage order by target_table, target_column")
 
 
 # ------------------------------------------------------------ self-monitoring
@@ -683,10 +884,19 @@ def readiness(probe: int = 0) -> dict[str, Any]:
             contracts_count = conn.execute("select count(*) from contracts").fetchone()[0]
         return f"{domains_count} domains, {contracts_count} contracts"
 
+    def check_scanner() -> str:
+        try:
+            import sqlglot  # noqa: F401
+        except ImportError:
+            return "sqlglot not installed — repo scanning disabled"
+        SCAN_ROOT.mkdir(parents=True, exist_ok=True)
+        return f"ready — sqlglot available, scan root {SCAN_ROOT.name}/"
+
     checks = [
         _check("database", check_database),
         _check("object_store", check_object_store),
         _check("ai_provider", check_ai_provider),
+        _check("scanner", check_scanner),
         _check("seed_data", check_seed),
     ]
     # ai_provider not being configured is informational, not a failure.
