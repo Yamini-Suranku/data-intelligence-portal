@@ -30,7 +30,7 @@
     <section class="panel active glossary-controls" aria-label="Glossary filters">
       <label class="glossary-search-label" for="glossary-search">Search terms</label>
       <input id="glossary-search" type="search" class="glossary-search" placeholder="Search a term or definition — e.g. dedup, lineage, marker…" autocomplete="off">
-      <div class="glossary-cats" role="group" aria-label="Categories">
+      <div id="glossary-cats" class="glossary-cats" role="group" aria-label="Categories">
         <button type="button" class="glossary-chip is-active" data-cat="all">All</button>
         <button type="button" class="glossary-chip" data-cat="source">Source &amp; contracts</button>
         <button type="button" class="glossary-chip" data-cat="ingestion">Ingestion &amp; process</button>
@@ -239,9 +239,27 @@
     (function () {
       var search = document.getElementById("glossary-search");
       var empty = document.getElementById("glossary-empty");
-      var chips = Array.prototype.slice.call(document.querySelectorAll(".glossary-chip"));
-      var sections = Array.prototype.slice.call(document.querySelectorAll("section[data-cat]"));
+      var cats = document.getElementById("glossary-cats");
+      var chips = [];
+      var sections = [];
       var activeCat = "all";
+
+      function escapeHtml(value) {
+        return String(value || "").replace(/[&<>"']/g, function (char) {
+          return {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;"
+          }[char];
+        });
+      }
+
+      function refreshCollections() {
+        chips = Array.prototype.slice.call(document.querySelectorAll(".glossary-chip"));
+        sections = Array.prototype.slice.call(document.querySelectorAll("section[data-cat]"));
+      }
 
       function apply() {
         var query = (search.value || "").trim().toLowerCase();
@@ -261,14 +279,72 @@
         empty.hidden = totalVisible !== 0;
       }
 
-      search.addEventListener("input", apply);
-      chips.forEach(function (chip) {
-        chip.addEventListener("click", function () {
-          activeCat = chip.getAttribute("data-cat");
-          chips.forEach(function (c) { c.classList.toggle("is-active", c === chip); });
-          apply();
+      function bindChips() {
+        refreshCollections();
+        chips.forEach(function (chip) {
+          chip.addEventListener("click", function () {
+            activeCat = chip.getAttribute("data-cat");
+            chips.forEach(function (c) { c.classList.toggle("is-active", c === chip); });
+            apply();
+          });
         });
-      });
+      }
+
+      function renderData(data) {
+        var categories = data.categories || [];
+        var apps = {};
+        (data.apps || []).forEach(function (app) {
+          apps[app.id] = app.label;
+        });
+
+        cats.innerHTML = '<button type="button" class="glossary-chip is-active" data-cat="all">All</button>' +
+          categories.map(function (cat) {
+            return '<button type="button" class="glossary-chip" data-cat="' + escapeHtml(cat.id) + '">' +
+              escapeHtml(cat.label) + '</button>';
+          }).join("");
+
+        document.querySelectorAll("section[data-cat]").forEach(function (section) {
+          section.remove();
+        });
+
+        var keepReading = Array.prototype.slice.call(document.querySelectorAll("main > section.panel"))
+          .filter(function (section) {
+            return !section.classList.contains("glossary-controls") && !section.hasAttribute("data-cat");
+          })[0];
+
+        categories.forEach(function (cat) {
+          var terms = (data.terms || []).filter(function (term) {
+            return term.category === cat.id;
+          });
+          var section = document.createElement("section");
+          section.className = "panel active";
+          section.setAttribute("data-cat", cat.id);
+          section.innerHTML =
+            '<div class="section-head">' +
+              '<div>' +
+                '<p class="eyebrow">' + escapeHtml(cat.label) + '</p>' +
+                '<h2>' + escapeHtml(cat.heading) + '</h2>' +
+              '</div>' +
+              '<p>' + escapeHtml(cat.blurb) + '</p>' +
+            '</div>' +
+            '<dl class="glossary">' +
+              terms.map(function (term) {
+                var appLabel = apps[term.app] || term.app || "Core concepts";
+                return '<div class="glossary-item">' +
+                  '<dt>' + escapeHtml(term.term) + '</dt>' +
+                  '<dd>' + term.definition + '<p class="meta">' + escapeHtml(appLabel) + '</p></dd>' +
+                '</div>';
+              }).join("") +
+            '</dl>';
+          keepReading.parentNode.insertBefore(section, keepReading);
+        });
+
+        activeCat = "all";
+        bindChips();
+        apply();
+      }
+
+      search.addEventListener("input", apply);
       var reset = document.querySelector(".glossary-empty-reset");
       if (reset) {
         reset.addEventListener("click", function () {
@@ -279,6 +355,17 @@
           search.focus();
         });
       }
+      bindChips();
+      fetch("/learn/glossary.json")
+        .then(function (response) {
+          if (!response.ok) { throw new Error("glossary"); }
+          return response.json();
+        })
+        .then(renderData)
+        .catch(function () {
+          refreshCollections();
+          apply();
+        });
     })();
   </script>
 </body>
