@@ -492,7 +492,10 @@ def openai_answer(question: str) -> dict[str, Any] | None:
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=20) as response:
+        # Local models (Ollama, LM Studio) are slower than cloud APIs on a full
+        # context, so allow a longer timeout via OPENAI_TIMEOUT (default 20s).
+        timeout = float(os.getenv("OPENAI_TIMEOUT", "20"))
+        with request.urlopen(req, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
             return {"mode": "openai-compatible", "answer": body["choices"][0]["message"]["content"], "sources": ["local portal context"]}
     except Exception:
