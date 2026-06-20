@@ -591,3 +591,35 @@ footer a {
   padding: 0;
   text-decoration: underline;
 }
+
+/* ----------------------------------------------------------- column lineage drill-down */
+.column-lineage {
+  margin-top: 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+  padding: clamp(0.9rem, 2.5vw, 1.3rem);
+}
+.col-lineage-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.col-lineage-table th {
+  text-align: left;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--line);
+  padding: 0.4rem 0.6rem;
+}
+.col-lineage-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.45rem 0.6rem;
+  vertical-align: top;
+  color: var(--ink);
+}
+.col-lineage-table code {
+  background: #eef6ff;
+  border-radius: 5px;
+  font-size: 0.82em;
+  padding: 0.05rem 0.35rem;
+}

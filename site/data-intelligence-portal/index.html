@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/assets/styles.css?v=5">
+  <link rel="stylesheet" href="/assets/styles.css?v=6">
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js" defer></script>
 </head>
 <body>
@@ -36,6 +36,7 @@
 
     <nav class="tabs" aria-label="Portal views">
       <button class="active" data-tab="build" type="button">Build</button>
+      <button data-tab="scan" type="button">Scan Repo</button>
       <button data-tab="domains" type="button">Domains</button>
       <button data-tab="contracts" type="button">Contracts</button>
       <button data-tab="runs" type="button">Ingestion Runs</button>
@@ -124,6 +125,49 @@
       </div>
     </section>
 
+    <!-- SCAN REPO -->
+    <section id="scan" class="panel">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Code &amp; report lineage</p>
+          <h2>Scan a repo</h2>
+        </div>
+        <p id="scan-mode" class="meta">Configure a folder of SQL and BI reports to parse into lineage.</p>
+      </div>
+      <p id="scan-status" class="answer" hidden></p>
+
+      <div class="build-grid">
+        <form id="scan-form" class="builder-card">
+          <h3>Configure source</h3>
+          <label>Name <input name="name" required placeholder="analytics-repo"></label>
+          <label>Path (under the scan root)
+            <input name="path" required placeholder="analytics">
+          </label>
+          <label>SQL globs (comma-separated)
+            <input name="sql_globs" placeholder="models/**/*.sql, sql/**/*.sql">
+          </label>
+          <label>Report globs (comma-separated)
+            <input name="report_globs" placeholder="**/*.twb, **/*.twbx, **/*.pbix, **/*.pbit">
+          </label>
+          <label>Naming convention regex (optional, named group <code>?P&lt;name&gt;</code>)
+            <input name="naming_pattern" placeholder="rpt_(?P&lt;name&gt;.+)\.twb$">
+          </label>
+          <label>SQL dialect (optional)
+            <input name="dialect" placeholder="snowflake, bigquery, postgres, tsql…">
+          </label>
+          <button type="submit" class="button-link primary">Add source &amp; scan</button>
+        </form>
+
+        <div class="builder-card">
+          <h3>Sources &amp; runs</h3>
+          <p class="hint">SQL parses fully (tables, columns, transformations). Tableau reads embedded
+            custom SQL + relations. PowerBI is best-effort (Power Query M / native SQL).</p>
+          <div id="scan-sources" class="stack"></div>
+          <div id="scan-result"></div>
+        </div>
+      </div>
+    </section>
+
     <section id="domains" class="panel">
       <div class="section-head"><div><p class="eyebrow">Source ownership</p><h2>Domains</h2></div>
         <p>Source-system domains. Define your own in the Build tab.</p></div>
@@ -168,8 +212,10 @@
           <div class="legend" id="data-legend"></div>
         </div>
         <div class="graph-wrap"><svg id="data-graph" class="graph"></svg>
-          <p id="data-graph-empty" class="graph-empty">No data lineage yet — run ingestion or add an edge.</p>
+          <p id="data-graph-empty" class="graph-empty">No data lineage yet — run ingestion, add an edge, or scan a repo.</p>
         </div>
+        <p class="hint">Click a table or report node to drill into its column-level lineage.</p>
+        <div id="column-lineage" class="column-lineage" hidden></div>
       </div>
       <div class="graph-block">
         <div class="graph-head"><h3>Process lineage</h3></div>
@@ -221,6 +267,6 @@
     <a href="https://github.com/Yamini-Suranku/data-intelligence-portal">GitHub</a>
   </footer>
 
-  <script src="/assets/app.js?v=4"></script>
+  <script src="/assets/app.js?v=5"></script>
 </body>
 </html>

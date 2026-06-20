@@ -132,6 +132,11 @@ async function api(path, options = {}) {
 
 function staticApi(path, options = {}) {
   const body = options.body ? JSON.parse(options.body) : {};
+  if (path.startsWith("/api/lineage/columns")) return [];
+  if (path.startsWith("/api/scan")) {
+    if (path === "/api/scan/sources" && options.method !== "POST") return [];
+    throw new Error("Scanning requires the FastAPI backend — not available in the static demo.");
+  }
   switch (path) {
     case "/api/demo/reset": staticReset(); return { status: "reset", domains: state.domains.length, contracts: state.contracts.length };
     case "/api/ingestion-runs/demo": { const r = staticRunDemoIngestion(); saveStatic(); return r; }
@@ -356,7 +361,7 @@ function nodeType(id, kind) {
   return ["intraday", "endofday", "analytics"].includes(layer) ? layer : "topic";
 }
 
-function drawForceGraph(svgSel, nodes, links, emptySel) {
+function drawForceGraph(svgSel, nodes, links, emptySel, onNodeClick) {
   const svg = d3.select(svgSel);
   svg.selectAll("*").remove();
   const empty = $(emptySel);
@@ -396,8 +401,10 @@ function drawForceGraph(svgSel, nodes, links, emptySel) {
   );
 
   node.append("circle").attr("r", 14).attr("fill", (d) => LAYER_COLOR[d.type] || "#64748b").attr("stroke", "#ffffff").attr("stroke-width", 2)
-    .on("mousemove", (event, d) => showTip(`<strong>${esc(d.id)}</strong><br>${esc(d.detail || d.type)}`, event.pageX, event.pageY))
-    .on("mouseleave", hideTip);
+    .style("cursor", onNodeClick ? "pointer" : "default")
+    .on("mousemove", (event, d) => showTip(`<strong>${esc(d.id)}</strong><br>${esc(d.detail || d.type)}${onNodeClick ? "<br><em>click to drill into columns</em>" : ""}`, event.pageX, event.pageY))
+    .on("mouseleave", hideTip)
+    .on("click", (event, d) => { if (onNodeClick) onNodeClick(d); });
   node.append("text").attr("class", "node-label").attr("x", 18).attr("y", 4).attr("font-size", 11).attr("fill", "#0f172a").text((d) => d.label || d.id);
 
   sim.on("tick", () => {
@@ -420,7 +427,7 @@ function renderGraphs() {
   const addNode = (id, kind, label, detail) => { if (!nodeMap.has(id)) nodeMap.set(id, { id, type: nodeType(id, kind), label: label || id, detail }); };
   state.dataLineage.forEach((e) => { addNode(e.source, "topic"); addNode(e.target); });
   const dataLinks = state.dataLineage.map((e) => ({ source: e.source, target: e.target, relation: e.relation }));
-  drawForceGraph("#data-graph", Array.from(nodeMap.values()), dataLinks, "#data-graph-empty");
+  drawForceGraph("#data-graph", Array.from(nodeMap.values()), dataLinks, "#data-graph-empty", showColumnLineage);
 
   const pMap = new Map();
   const pLinks = [];
@@ -434,6 +441,103 @@ function renderGraphs() {
     pLinks.push({ source: runNode, target: stepNode, relation: s.step_name });
   });
   drawForceGraph("#process-graph", Array.from(pMap.values()), pLinks, "#process-graph-empty");
+}
+
+async function showColumnLineage(node) {
+  const el = $("#column-lineage");
+  if (!el) return;
+  const table = node.id;
+  let edges = [];
+  try { edges = await api(`/api/lineage/columns?table=${encodeURIComponent(table)}`); }
+  catch (_) { edges = []; }
+  if (!edges.length) {
+    el.hidden = false;
+    el.innerHTML = `<div class="section-head"><div><p class="eyebrow">Column lineage</p><h3>${esc(table)}</h3></div>
+      <button type="button" class="button-link" id="col-close">Close</button></div>
+      <p class="hint">No column-level lineage captured for this node (scan a repo with SQL/reports to populate it).</p>`;
+    $("#col-close").addEventListener("click", () => { el.hidden = true; });
+    return;
+  }
+  // group by target column
+  const byTarget = new Map();
+  edges.forEach((e) => {
+    const key = `${e.target_table}.${e.target_column}`;
+    if (!byTarget.has(key)) byTarget.set(key, { transformation: e.transformation, sources: [] });
+    if (e.source_table) byTarget.get(key).sources.push(`${e.source_table}.${e.source_column || "*"}`);
+  });
+  const rowsHtml = Array.from(byTarget.entries()).map(([target, info]) =>
+    `<tr><td>${esc(target)}</td>
+      <td>${info.sources.length ? info.sources.map((s) => `<code>${esc(s)}</code>`).join(", ") : "<em>—</em>"}</td>
+      <td>${info.transformation ? `<code>${esc(info.transformation)}</code>` : "<em>—</em>"}</td></tr>`).join("");
+  el.hidden = false;
+  el.innerHTML = `<div class="section-head"><div><p class="eyebrow">Column lineage</p><h3>${esc(table)}</h3></div>
+      <button type="button" class="button-link" id="col-close">Close</button></div>
+    <table class="col-lineage-table"><thead><tr><th>Column</th><th>Sources</th><th>Transformation</th></tr></thead>
+    <tbody>${rowsHtml}</tbody></table>`;
+  $("#col-close").addEventListener("click", () => { el.hidden = true; });
+}
+
+/* ----------------------------------------------------------------- repo scanner */
+
+function csv(value) { return String(value || "").split(",").map((s) => s.trim()).filter(Boolean); }
+
+async function renderScan() {
+  const modeEl = $("#scan-mode");
+  if (state.staticMode) { if (modeEl) modeEl.textContent = "Scanning requires the FastAPI backend — not available in the static (GitHub Pages) demo."; }
+  const list = $("#scan-sources");
+  if (!list) return;
+  let sources = [];
+  try { sources = await api("/api/scan/sources"); }
+  catch (_) { list.innerHTML = `<p class="hint">Connect the backend to configure and run scans.</p>`; return; }
+  list.innerHTML = sources.length ? sources.map((s) =>
+    `<article class="card"><h4>${esc(s.name)}</h4>
+      <div class="meta">${esc(s.path)} · ${esc((s.sql_globs || []).join(", ") || "default SQL globs")}</div>
+      <button type="button" class="button-link" data-rescan="${esc(s.id)}">Run scan</button></article>`).join("")
+    : `<p class="hint">No sources yet — configure one on the left.</p>`;
+  list.querySelectorAll("[data-rescan]").forEach((b) =>
+    b.addEventListener("click", () => runScan(b.dataset.rescan)));
+}
+
+async function runScan(sourceId) {
+  const status = $("#scan-status");
+  const result = $("#scan-result");
+  try {
+    const summary = await api(`/api/scan/sources/${sourceId}/run`, { method: "POST" });
+    if (status) { status.hidden = false; status.textContent = `Scanned ${summary.files} file(s) — ${summary.tables} tables, ${summary.columns} column links.`; }
+    if (result) result.innerHTML = (summary.warnings || []).length
+      ? `<div class="meta">Warnings:</div><ul class="agent-uses">${summary.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>`
+      : `<div class="meta">No warnings. Open the Lineage Graph and click a node to drill into columns.</div>`;
+    await refresh();
+    if ($("#graph").classList.contains("active")) renderGraphs();
+  } catch (err) {
+    if (status) { status.hidden = false; status.textContent = err.message || "Scan failed (backend required)."; }
+  }
+}
+
+function wireScanForm() {
+  const form = $("#scan-form");
+  if (!form) return;
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const payload = {
+      name: f.name.value.trim(),
+      path: f.path.value.trim(),
+      sql_globs: csv(f.sql_globs.value),
+      report_globs: csv(f.report_globs.value),
+      naming_conventions: f.naming_pattern.value.trim() ? [{ pattern: f.naming_pattern.value.trim() }] : [],
+      dialect: f.dialect.value.trim(),
+    };
+    try {
+      const src = await api("/api/scan/sources", { method: "POST", body: JSON.stringify(payload) });
+      f.reset();
+      await renderScan();
+      await runScan(src.id);
+    } catch (err) {
+      const status = $("#scan-status");
+      if (status) { status.hidden = false; status.textContent = err.message || "Scanning requires the backend."; }
+    }
+  });
 }
 
 /* ------------------------------------------------------------------ monitoring */
@@ -514,6 +618,7 @@ function onTabShown(tab) {
   if (tab === "graph") renderGraphs();
   else if (tab === "monitoring") startMonitoring(); else stopMonitoring();
   if (tab === "agents") renderAgents();
+  if (tab === "scan") renderScan();
 }
 
 function activateTab(id) {
@@ -564,6 +669,7 @@ $("#monitor-auto").addEventListener("change", startMonitoring);
 
 tooltipEl = $("#graph-tooltip");
 wireBuildForms();
+wireScanForm();
 refresh().then(activateTabFromHash).catch((error) => {
   document.body.insertAdjacentHTML("afterbegin", `<div class="answer">Failed to load portal data: ${esc(error.message)}</div>`);
 });
