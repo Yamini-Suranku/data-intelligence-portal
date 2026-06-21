@@ -1,0 +1,49 @@
+name: Deploy to AWS Lambda
+
+# Dormant until you opt in: set repo Variable DEPLOY_LAMBDA=true (plus
+# AWS_DEPLOY_ROLE_ARN, AWS_REGION, ECR_REPOSITORY_URI from the bootstrap stack —
+# see DEPLOY.md). Uses GitHub OIDC — no long-lived AWS keys.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/data-intelligence-portal/**"
+      - "site/**"
+      - "template.yaml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # request the OIDC token
+  contents: read
+
+jobs:
+  deploy:
+    if: ${{ vars.DEPLOY_LAMBDA == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: SAM build
+        run: sam build
+
+      - name: SAM deploy
+        run: |
+          sam deploy \
+            --stack-name suranku-data-intelligence-portal \
+            --image-repository "${{ vars.ECR_REPOSITORY_URI }}" \
+            --capabilities CAPABILITY_IAM \
+            --resolve-s3 \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides "AnthropicApiKey=${{ secrets.ANTHROPIC_API_KEY }}"

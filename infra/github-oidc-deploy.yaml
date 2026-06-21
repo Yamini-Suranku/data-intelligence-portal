@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  One-time bootstrap for CI deploys of the Data Intelligence Portal to AWS Lambda.
+  Creates (1) a GitHub Actions OIDC provider, (2) an ECR repository with a
+  keep-last-3 lifecycle policy, and (3) a deploy IAM role assumable ONLY by this
+  repo's main branch via OIDC (no long-lived AWS keys). Deploy once:
+
+    aws cloudformation deploy \
+      --template-file infra/github-oidc-deploy.yaml \
+      --stack-name suranku-portal-deploy \
+      --capabilities CAPABILITY_IAM
+
+  Then read the Outputs and set them as repo Variables (see DEPLOY.md).
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: Yamini-Suranku
+  GitHubRepo:
+    Type: String
+    Default: suranku-public
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: Only this branch can assume the deploy role.
+  AppStackName:
+    Type: String
+    Default: suranku-data-intelligence-portal
+    Description: Must match the SAM stack name used by the deploy workflow.
+  EcrRepoName:
+    Type: String
+    Default: suranku-data-intelligence-portal
+  CreateOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Set false if your account already has the GitHub Actions OIDC provider.
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: Required when CreateOidcProvider=false.
+
+Conditions:
+  ShouldCreateOidc: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOidc
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref EcrRepoName
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        # Keep storage to a few cents/month: retain only the last 3 images.
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 3 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 3
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: GitHub Actions OIDC deploy role for the Data Intelligence Portal (SAM/Lambda).
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateOidc
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${GitHubBranch}"
+      Policies:
+        - PolicyName: sam-lambda-deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # CloudFormation orchestrates the deploy (app stack + SAM managed bucket stack).
+              - Sid: CloudFormation
+                Effect: Allow
+                Action: cloudformation:*
+                Resource:
+                  - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppStackName}/*"
+                  - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/aws-sam-cli-managed-default/*"
+              - Sid: CloudFormationReadAndValidate
+                Effect: Allow
+                Action:
+                  - cloudformation:Describe*
+                  - cloudformation:List*
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:CreateChangeSet
+                Resource: "*"
+              # SAM artifact bucket (created/used via --resolve-s3).
+              - Sid: SamArtifactBucket
+                Effect: Allow
+                Action: s3:*
+                Resource:
+                  - arn:aws:s3:::aws-sam-cli-managed-default*
+                  - arn:aws:s3:::aws-sam-cli-managed-default*/*
+              # Push the container image.
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: EcrRepo
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:DescribeRepositories
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:ListImages
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !GetAtt EcrRepository.Arn
+              # The Lambda function the SAM template manages.
+              - Sid: Lambda
+                Effect: Allow
+                Action: lambda:*
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AppStackName}-*"
+              # The function's execution role (created/passed by CloudFormation).
+              - Sid: IamForExecutionRole
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PassRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/${AppStackName}-*"
+              # The function's log group.
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:DescribeLogGroups
+                  - logs:PutRetentionPolicy
+                  - logs:TagResource
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AppStackName}-*"
+
+Outputs:
+  DeployRoleArn:
+    Description: Set as repo Variable AWS_DEPLOY_ROLE_ARN.
+    Value: !GetAtt DeployRole.Arn
+  EcrRepositoryUri:
+    Description: Set as repo Variable ECR_REPOSITORY_URI.
+    Value: !GetAtt EcrRepository.RepositoryUri
+  Region:
+    Description: Set as repo Variable AWS_REGION.
+    Value: !Ref AWS::Region

@@ -79,6 +79,38 @@ Lambda specifics (already wired in the image):
 - Static-through-Lambda means each same-origin asset is an invocation — negligible at low
   traffic. If it grows, put `site/` on **S3 + CloudFront** and keep Lambda for `/api`.
 
+### Automate Lambda deploys (GitHub OIDC — no long-lived AWS keys)
+
+Redeploy on every push to `main`, using short-lived OIDC tokens instead of stored AWS keys.
+Cost: **$0** (Actions is free on this public repo; OIDC/IAM are free). Two files do it:
+[`infra/github-oidc-deploy.yaml`](infra/github-oidc-deploy.yaml) (one-time bootstrap) and
+[`.github/workflows/deploy-lambda.yml`](.github/workflows/deploy-lambda.yml) (the workflow,
+**dormant until you opt in**).
+
+1. **Bootstrap once** (creates the OIDC provider, an ECR repo with a keep-last-3 lifecycle
+   policy, and a deploy role assumable *only* by this repo's `main`):
+   ```bash
+   aws cloudformation deploy \
+     --template-file infra/github-oidc-deploy.yaml \
+     --stack-name suranku-portal-deploy \
+     --capabilities CAPABILITY_IAM
+   # already have a GitHub OIDC provider? add:
+   #   --parameter-overrides CreateOidcProvider=false ExistingOidcProviderArn=arn:aws:iam::<acct>:oidc-provider/token.actions.githubusercontent.com
+   aws cloudformation describe-stacks --stack-name suranku-portal-deploy \
+     --query 'Stacks[0].Outputs' --output table
+   ```
+2. **GitHub → Settings → Secrets and variables → Actions:**
+   - **Variables:** `DEPLOY_LAMBDA=true`, `AWS_DEPLOY_ROLE_ARN=<DeployRoleArn>`,
+     `AWS_REGION=<Region>`, `ECR_REPOSITORY_URI=<EcrRepositoryUri>` (the bootstrap Outputs).
+   - **Secret (optional):** `ANTHROPIC_API_KEY` for Claude answers.
+3. Push to `main` (or run the workflow manually) → it assumes the role via OIDC and
+   `sam build && sam deploy`. The first run prints the Function URL.
+
+The deploy role is broad on the services SAM needs but **scoped by resource** (the app stack,
+the SAM bucket, the ECR repo, the function + its role + log group) and, crucially, **only
+assumable by `repo:<org>/<repo>:ref:refs/heads/main`** — so nothing else can use it. If a first
+deploy trips on a missing action, widen that one action in the bootstrap template and re-run it.
+
 ### Persistence
 Metadata is **SQLite at `/app/data`** — ephemeral by default on a PaaS (resets on redeploy).
 For durable data, attach a 1 GB volume at `/app/data` (commented blocks in `render.yaml` /
