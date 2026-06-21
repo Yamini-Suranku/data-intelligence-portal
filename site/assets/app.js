@@ -9,6 +9,7 @@ const state = {
   dataLineage: [],
   processLineage: [],
   columnTables: new Set(),
+  scan: null,            // loaded sample-scan fixture (column lineage) in static mode
   staticMode: false
 };
 
@@ -51,7 +52,7 @@ function clone(value) { return JSON.parse(JSON.stringify(value)); }
 function saveStatic() {
   if (!state.staticMode) return;
   const snapshot = {};
-  ["domains", "contracts", "events", "runs", "catalogs", "dataLineage", "processLineage"].forEach((k) => { snapshot[k] = state[k]; });
+  ["domains", "contracts", "events", "runs", "catalogs", "dataLineage", "processLineage", "scan"].forEach((k) => { snapshot[k] = state[k]; });
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot)); } catch (_) { /* ignore quota */ }
 }
 
@@ -63,6 +64,7 @@ function staticReset() {
   state.catalogs = [];
   state.dataLineage = [];
   state.processLineage = [];
+  state.scan = null;
   saveStatic();
 }
 
@@ -141,11 +143,28 @@ async function api(path, options = {}) {
 
 function staticApi(path, options = {}) {
   const body = options.body ? JSON.parse(options.body) : {};
-  if (path.startsWith("/api/lineage/column-tables")) return [];
-  if (path.startsWith("/api/lineage/columns")) return [];
+  if (path.startsWith("/api/lineage/column-tables")) return state.scan ? state.scan.tables : [];
+  if (path.startsWith("/api/lineage/columns")) {
+    const table = decodeURIComponent((path.split("table=")[1] || "").split("&")[0]);
+    return (state.scan && state.scan.columns[table]) || [];
+  }
   if (path.startsWith("/api/scan")) {
+    // The bundled sample scan is precomputed (window.SAMPLE_SCAN) so the static demo
+    // showcases data + column + process lineage with no backend. It loads once and is
+    // appended to the lineage state; reset clears it. Scanning your OWN repo (github
+    // URL / zip / a saved source) genuinely needs the backend.
+    if (path === "/api/scan/demo" && options.method === "POST") {
+      if (!window.SAMPLE_SCAN) throw new Error("Sample scan data is unavailable.");
+      if (!state.scan) {
+        state.dataLineage = state.dataLineage.concat(window.SAMPLE_SCAN.dataLineage);
+        state.processLineage = state.processLineage.concat(window.SAMPLE_SCAN.processLineage);
+        state.scan = { tables: window.SAMPLE_SCAN.tables, columns: window.SAMPLE_SCAN.columns };
+        saveStatic();
+      }
+      return window.SAMPLE_SCAN.summary;
+    }
     if (path === "/api/scan/sources" && options.method !== "POST") return [];
-    throw new Error("Scanning requires the FastAPI backend — not available in the static demo.");
+    throw new Error("Scanning your own repo requires the full app — run it with Docker, or use the live demo at app.suranku.com.");
   }
   switch (path) {
     case "/api/demo/reset": staticReset(); return { status: "reset", domains: state.domains.length, contracts: state.contracts.length };
