@@ -1,0 +1,104 @@
+name: Teardown live app
+
+# On-demand: delete a live app's AWS Lambda stack AND mark it static-only in the
+# registry so the hub stops advertising the live demo. The static demo on
+# public.suranku.com (GitHub Pages) is unaffected — it has no backend.
+#
+# PREREQUISITE: set repo Variable DEPLOY_LAMBDA=false first (Settings → Secrets and
+# variables → Actions → Variables). Otherwise the registry commit this workflow
+# pushes would re-trigger "Deploy to AWS Lambda" and recreate the app. This workflow
+# refuses to run while DEPLOY_LAMBDA=true.
+#
+# Run it from the `main` branch (the OIDC deploy role only trusts main).
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_id:
+        description: "App id — matches site/apps.json id and the SAM stack suranku-<id>"
+        required: true
+        default: data-intelligence-portal
+      confirm:
+        description: "Type the app id again to confirm deletion"
+        required: true
+
+permissions:
+  id-token: write   # OIDC -> AWS
+  contents: write   # commit the registry change
+
+jobs:
+  teardown:
+    # Safety gate: the two inputs must match.
+    if: ${{ inputs.app_id == inputs.confirm }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Refuse if auto-deploy is still enabled
+        run: |
+          if [ "${{ vars.DEPLOY_LAMBDA }}" = "true" ]; then
+            echo "::error::DEPLOY_LAMBDA is 'true'. Set it to false before teardown, or the registry commit will recreate the app."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Delete the app's Lambda stack
+        run: |
+          STACK="suranku-${{ inputs.app_id }}"
+          if ! aws cloudformation describe-stacks --stack-name "$STACK" >/dev/null 2>&1; then
+            echo "Stack $STACK does not exist — already torn down. Continuing to update the registry."
+          else
+            echo "Deleting stack $STACK (Lambda + Function URL + role + log group)…"
+            aws cloudformation delete-stack --stack-name "$STACK"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK"
+            echo "Deleted $STACK."
+          fi
+
+      - name: Mark the app static-only in the registry
+        run: |
+          python3 - "${{ inputs.app_id }}" <<'PY'
+          import json, sys
+          app_id = sys.argv[1]
+          path = "site/apps.json"
+          apps = json.load(open(path))
+          found = False
+          for a in apps:
+              if a.get("id") == app_id:
+                  a["status"] = "static-only"
+                  a["api"] = None
+                  found = True
+          if not found:
+              raise SystemExit(f"app_id '{app_id}' not found in {path}")
+          with open(path, "w") as fh:
+              json.dump(apps, fh, indent=2)
+              fh.write("\n")
+          print(f"Marked {app_id} static-only (api=null).")
+          PY
+
+      - name: Commit the registry change (hub drops the "Live app" link)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add site/apps.json
+          if git diff --cached --quiet; then
+            echo "Registry already static-only — nothing to commit."
+          else
+            git commit -m "Teardown ${{ inputs.app_id }}: mark static-only (live demo unavailable)"
+            git push origin HEAD:main
+          fi
+
+      - name: Summary
+        run: |
+          echo "## Teardown complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Deleted Lambda stack: \`suranku-${{ inputs.app_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Registry: \`${{ inputs.app_id }}\` → status \`static-only\`, \`api: null\` (hub no longer links the live demo)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Static demo on public.suranku.com is unaffected." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Note:** app.suranku.com still resolves to CloudFront, whose origin is now gone, so direct visitors get a 5xx until you repoint/remove the Cloudflare \`app\` record (or delete the \`suranku-portal-cdn\` stack with an admin profile). The hub no longer sends anyone there." >> "$GITHUB_STEP_SUMMARY"

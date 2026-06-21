@@ -111,6 +111,28 @@ the SAM bucket, the ECR repo, the function + its role + log group) and, cruciall
 assumable by `repo:<org>/<repo>:ref:refs/heads/main`** — so nothing else can use it. If a first
 deploy trips on a missing action, widen that one action in the bootstrap template and re-run it.
 
+### Bring a live app down (on-demand)
+
+The **Teardown live app** workflow (`.github/workflows/teardown-app.yml`,
+`workflow_dispatch`) deletes a selected app's Lambda stack via OIDC **and** flips its
+`site/apps.json` entry to `status: static-only`, `api: null` so the hub stops linking the live
+demo. The Pages static demo (`public.suranku.com`) is unaffected.
+
+1. **Pause deploys first:** set repo Variable `DEPLOY_LAMBDA=false` (else the registry commit the
+   teardown pushes would re-trigger the deploy and recreate the app — the workflow refuses to run
+   while it's `true`).
+2. Actions → **Teardown live app** → Run workflow (on `main`) → enter `app_id` (e.g.
+   `data-intelligence-portal`) and type it again to confirm. It deletes `suranku-<app_id>` and
+   commits the registry change (Pages redeploys; the "Live app ↗" link disappears).
+
+`app.suranku.com` still resolves to CloudFront whose origin is now gone, so **direct** visitors get
+a 5xx until you repoint/remove the Cloudflare `app` record (or delete the `suranku-portal-cdn`
+stack with an admin profile) — but the hub no longer sends anyone there.
+
+**Bring it back:** set `DEPLOY_LAMBDA=true`, restore the registry entry (`status: live`, `api`
+set), and run **Deploy to AWS Lambda**. A recreated Lambda gets a **new Function URL**, so
+redeploy `suranku-portal-cdn` (or update its `OriginDomainName`) to match.
+
 ### Persistence
 Metadata is **SQLite at `/app/data`** — ephemeral by default on a PaaS (resets on redeploy).
 For durable data, attach a 1 GB volume at `/app/data` (commented blocks in `render.yaml` /
